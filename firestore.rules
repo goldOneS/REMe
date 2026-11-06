@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function text(v, max) {
+      return v is string && v.size() > 0 && v.size() <= max;
+    }
+
+    match /events/{eventId} {
+      allow read: if signedIn();
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll(
+             ['name', 'venue', 'date', 'price', 'capacity', 'available', 'createdBy', 'createdAt'])
+        && request.resource.data.keys().hasOnly(
+             ['name', 'venue', 'date', 'price', 'capacity', 'available', 'createdBy', 'createdAt'])
+        && text(request.resource.data.name, 80)
+        && text(request.resource.data.venue, 80)
+        && request.resource.data.date is timestamp
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.capacity is int
+        && request.resource.data.capacity > 0
+        && request.resource.data.available == request.resource.data.capacity
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+
+      // Cada descuento debe corresponder a un boleto creado en la misma transacción.
+      allow update: if signedIn()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['available', 'lastPurchaseId'])
+        && request.resource.data.available is int
+        && request.resource.data.available >= 0
+        && request.resource.data.available < resource.data.available
+        && request.resource.data.lastPurchaseId is string
+        && existsAfter(/databases/$(database)/documents/tickets/$(request.resource.data.lastPurchaseId))
+        && getAfter(/databases/$(database)/documents/tickets/$(request.resource.data.lastPurchaseId)).data.eventId == eventId
+        && getAfter(/databases/$(database)/documents/tickets/$(request.resource.data.lastPurchaseId)).data.uid == request.auth.uid
+        && getAfter(/databases/$(database)/documents/tickets/$(request.resource.data.lastPurchaseId)).data.quantity
+             == resource.data.available - request.resource.data.available;
+
+      allow delete: if false;
+    }
+
+    match /tickets/{ticketId} {
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll(
+             ['eventId', 'eventName', 'buyerName', 'email', 'quantity', 'unitPrice', 'total', 'uid', 'createdAt'])
+        && request.resource.data.keys().hasOnly(
+             ['eventId', 'eventName', 'buyerName', 'email', 'quantity', 'unitPrice', 'total', 'uid', 'createdAt'])
+        && request.resource.data.eventId is string
+        && text(request.resource.data.eventName, 80)
+        && text(request.resource.data.buyerName, 80)
+        && request.resource.data.email is string
+        && request.resource.data.email.size() <= 254
+        && request.resource.data.email.matches('^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$')
+        && request.resource.data.quantity is int
+        && request.resource.data.quantity >= 1
+        && request.resource.data.quantity <= 10
+        && request.resource.data.unitPrice is number
+        && request.resource.data.total == request.resource.data.unitPrice * request.resource.data.quantity
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && exists(/databases/$(database)/documents/events/$(request.resource.data.eventId))
+        && get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.price
+             == request.resource.data.unitPrice
+        && request.resource.data.eventName
+             == get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.name
+        && get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.available
+             >= request.resource.data.quantity
+        && getAfter(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.available
+             == get(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.available
+                - request.resource.data.quantity
+        && getAfter(/databases/$(database)/documents/events/$(request.resource.data.eventId)).data.lastPurchaseId == ticketId;
+
+      allow update, delete: if false;
+    }
+  }
+}
